@@ -1,20 +1,21 @@
+import os
 import subprocess
+# import paramiko
 
-from ssh_connect import SSHConn
+from ssh_module import ssh_connect
 import time
 import json
 import sys
 
 
-class SSHAuthorize():
+class SSHAuthorize:
+    remove_flag = '# Domain name resolution processing of ssh connection\n'
 
     def __init__(self):
-        self.connect_via_user = []  # [{node1:obj_connection_node1}]
+        self.connect_via_user = []
         self.cluster_info = self.read_config()
         self.keys_to_add = {}
-        # self.keys_to_remove = {}
-        # self.authored_hosts = []  # ["node1","node2"]
-        # self.all_keys = []
+        self.hosts_to_add = []
 
     def read_config(self):
         try:
@@ -38,20 +39,39 @@ class SSHAuthorize():
             json.dump(self.cluster_info, fw, indent=4, separators=(',', ': '))
         return self.cluster_info
 
-    def update_data(self, first_key, data_key, data_value):
-        self.cluster_info[first_key].update({data_key: data_value})
+    def update_public_key(self, first_key, cluster_name, kind, data_value):
+        self.cluster_info[first_key].update({cluster_name: {kind: data_value}})
         return self.cluster_info[first_key]
 
-    def update_member(self, first_key, data_key, data_value):
-        self.cluster_info[first_key][data_key].update(data_value)
+    def update_public_key_member(self, first_key, cluster_name, kind, data_value):
+        self.cluster_info[first_key][cluster_name][kind].update(data_value)
         return self.cluster_info[first_key]
 
-    def delete_data(self, first_key, data_key):
-        self.cluster_info[first_key].pop(data_key)
+    # data_value 是列表[[]]
+    def updata_hosts(self, first_key, cluster_name, kind, data_value):
+        self.cluster_info[first_key][cluster_name].update({kind: data_value})
         return self.cluster_info[first_key]
 
-    def delete_member(self, first_key, data_key, member_key):
-        self.cluster_info[first_key][data_key].pop(member_key)
+    # data_value 是列表[[]]
+    def updata_hosts_member(self, first_key, cluster_name, kind, data_value):
+        for value in data_value:
+            self.cluster_info[first_key][cluster_name][kind].append(value)
+        return self.cluster_info[first_key]
+
+    # 移除整个集群
+    # def delete_data(self, first_key, cluster_name):
+    #     self.cluster_info[first_key].pop(cluster_name)
+    #     return self.cluster_info[first_key]
+
+    def delete_public_key_member(self, first_key, cluster_name, kind, member_key):
+        self.cluster_info[first_key][cluster_name][kind].pop(member_key)
+        return self.cluster_info[first_key]
+
+    def delete_hosts_member(self, first_key, cluster_name, kind, member):
+        hosts_info_list = self.cluster_info[first_key][cluster_name][kind]
+        # host-[ip,hostname]
+        new_hosts_info_list = [host for host in hosts_info_list if host[1] != member]
+        self.cluster_info[first_key][cluster_name][kind] = new_hosts_info_list
         return self.cluster_info[first_key]
 
     def cluster_is_exist(self, key, target):
@@ -63,13 +83,13 @@ class SSHAuthorize():
     def node_is_exist(self, key, member):
         # 循环的字典为空则不会开始循环
         for data in self.cluster_info[key].values():
-            if member in data.keys():
+            if member in data['public_key'].keys():
                 return True
         return False
 
     def make_connect(self, ip, port, user, password):
         # update change self.connect_via_user or self.connect_via_key
-        ssh = SSHConn(ip, port, user, password, timeout=100)
+        ssh = ssh_connect.SSHConn(ip, port, user, password, timeout=100)
         # ssh.ssh_connect()
         self.connect_via_user.append(ssh)
         return ssh
@@ -91,13 +111,23 @@ class SSHAuthorize():
         public_key = ssh.exctCMD('cat /root/.ssh/id_rsa.pub').decode()
         return public_key
 
-    # @staticmethod
-    # def get_public_key_by_cmd(ip):
-    #     p = subprocess.Popen(f'ssh "root@{ip}" "cat /root/.ssh/id_rsa.pub"', stderr=subprocess.PIPE,
-    #                          stdout=subprocess.PIPE, stdin=subprocess.PIPE, shell=True)
-    #     out, err = p.communicate()
-    #     publick_key = out.decode()
-    #     return publick_key
+    @staticmethod
+    def get_hostname(ssh):
+        hostname = ssh.exctCMD('hostname').decode().strip()
+        return hostname
+
+    @staticmethod
+    def init_manager_node():
+        rsa_is_exist = bool(os.popen('[ -f /root/.ssh/id_rsa.pub ] && echo True').read())
+        if not rsa_is_exist:
+            os.system('ssh-keygen -f /root/.ssh/id_rsa -N ""')
+        time.sleep(2)
+        config_is_exist = bool(os.popen('[ -f /root/.ssh/config ] && echo True').read())
+        # 这里不要输入 -e 参数,转不转义都可以
+        if not config_is_exist:
+            os.system("echo 'StrictHostKeyChecking no\\nUserKnownHostsFile /dev/null' >> ~/.ssh/config ")
+        public_key = os.popen('cat /root/.ssh/id_rsa.pub').read()
+        return public_key
 
     def get_map_key_by_host(self, cluster_name, ip):
         if cluster_name not in self.cluster_info['Cluster'].keys():
@@ -106,28 +136,75 @@ class SSHAuthorize():
             return
         return self.cluster_info['Cluster'][cluster_name][ip]
 
+    # @staticmethod
+    # def get_host_ip():
+    #     """
+    #     查询本机ip地址
+    #     :return: ip
+    #     """
+    #     try:
+    #         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    #         s.connect(('8.8.8.8', 80))
+    #         ip = s.getsockname()[0]
+    #     finally:
+    #         s.close()
+    #
+    #     return ip
+    #
+    # def get_local_node_hosts_info(self):
+    #     local_ipaddr = self.get_host_ip()
+    #     local_hostname = os.popen('hostname').read()
+    #     return f'{local_ipaddr} {local_hostname}'
+
     def set_all_public_keys_by_cluster(self, cluster_name, all_public_key):
         if not all_public_key:
             return
-        self.update_data('Cluster', cluster_name, all_public_key)
+        self.update_public_key('Cluster', cluster_name, 'public_key', all_public_key)
         self.commit_data()
 
     def insert_new_public_keys_by_cluster(self, cluster_name):
         if not self.keys_to_add:
             return
-        self.update_member('Cluster', cluster_name, self.keys_to_add)
+        self.update_public_key_member('Cluster', cluster_name, 'public_key', self.keys_to_add)
         self.commit_data()
 
-    def get_map_key_node_for_cluster(self, cluster_name):
+    def set_all_hosts_by_cluster(self, cluster_name, hosts_info):
+        if not hosts_info:
+            return
+        self.updata_hosts('Cluster', cluster_name, 'hosts', hosts_info)
+        self.commit_data()
+
+    def insert_new_hosts_by_cluster(self, cluster_name):
+        if not self.hosts_to_add:
+            return
+        self.updata_hosts_member('Cluster', cluster_name, 'hosts', self.hosts_to_add)
+        self.commit_data()
+
+    def get_list_key_node_for_cluster(self, cluster_name):
         if cluster_name not in self.cluster_info['Cluster'].keys():
             return
-        return list(self.cluster_info['Cluster'][cluster_name].values())
+        return list(self.cluster_info['Cluster'][cluster_name]['public_key'].values())
+
+    def get_list_hosts_for_cluster(self, cluster_name):
+        if cluster_name not in self.cluster_info['Cluster'].keys():
+            return
+        return self.cluster_info['Cluster'][cluster_name]['hosts']
 
     def convert_all_keys_by_cluster_to_string(self, cluster_name):
         str = ""
-        if self.get_map_key_node_for_cluster(cluster_name):
-            for pb_key in self.get_map_key_node_for_cluster(cluster_name):
+        # 空不会进入循环，考虑 if 是否必要
+        if self.get_list_key_node_for_cluster(cluster_name):
+            for pb_key in self.get_list_key_node_for_cluster(cluster_name):
                 str = str + pb_key
+        return str
+
+    def convert_all_hosts_by_cluster_to_string(self, cluster_name):
+        str = ""
+        if self.get_list_hosts_for_cluster(cluster_name):
+            for value in self.get_list_hosts_for_cluster(cluster_name):
+                ip, hostname = value
+                str = self.remove_flag + f'{ip} {hostname}\n'
+            # 去掉最后一个\n可以使用 str = str[:-1]
         return str
 
     def convert_new_keys_by_cluster_to_string(self):
@@ -136,17 +213,28 @@ class SSHAuthorize():
             str = str + pb_key
         return str
 
+    def convert_new_hosts_by_cluster_to_string(self):
+        str = ""
+        for value in self.hosts_to_add:
+            ip, hostname = value
+            str = str + f'{ip} {hostname}\n'
+        return str
+
+    # 管理节点 公钥 处理？！
     def distribute_all_keys_by_connect_via_user(self, cluster_name):
         all_public_keys = self.convert_all_keys_by_cluster_to_string(cluster_name)
+        manager_node_pbk = self.init_manager_node()
+        all_public_keys = all_public_keys + manager_node_pbk
         if not all_public_keys:
             return
         for obj_connection in self.connect_via_user:
             obj_connection.exctCMD(f"echo -e \'{all_public_keys}\' >> /root/.ssh/authorized_keys")
 
     def distribute_new_keys_to_old_node_by_add(self, cluster_name):
-        old_node = [node for node in self.cluster_info['Cluster'][cluster_name].keys() if
+        old_node = [node for node in self.cluster_info['Cluster'][cluster_name]['public_key'].keys() if
                     node not in self.keys_to_add.keys()]
         new_public_keys = self.convert_new_keys_by_cluster_to_string()
+        # new_public_keys 初始值 "",当它是 "" 会 return
         if not new_public_keys:
             return
         # >> 表示不覆盖　继续在下一行编辑
@@ -155,9 +243,24 @@ class SSHAuthorize():
             subprocess.run(f'ssh root@{node} "echo -e \'{new_public_keys}\' &>> /root/.ssh/authorized_keys"',
                            shell=True)
 
+    def distribute_new_hosts_to_old_node_by_add(self, cluster_name):
+        old_node = [node for node in self.cluster_info['Cluster'][cluster_name]['public_key'].keys() if
+                    node not in self.keys_to_add.keys()]
+        new_hosts_info = self.convert_new_hosts_by_cluster_to_string()
+        for node in old_node:
+            subprocess.run(f'ssh root@{node} "echo -e \'{new_hosts_info}\' &>> /etc/hosts"',
+                           shell=True)
+
+    def distribute_new_hosts_to_local_node_by_add(self):
+        new_hosts_info = self.convert_new_hosts_by_cluster_to_string()
+        os.system(f"echo \'{new_hosts_info}\' >> /etc/hosts")
+
+    # 读取旧的文件然后移除删除节点的公钥然后再次写入
     def distribute_new_keys_to_old_node_by_remove(self, cluster_name):
-        old_node = [node for node in self.cluster_info['Cluster'][cluster_name].keys()]
+        old_node = [node for node in self.cluster_info['Cluster'][cluster_name]['public_key'].keys()]
         new_public_keys = self.convert_all_keys_by_cluster_to_string(cluster_name)
+        manager_node_pbk = self.init_manager_node()
+        new_public_keys = new_public_keys + manager_node_pbk
         if not new_public_keys:
             return
         # > 表示覆盖以前内容
@@ -165,11 +268,63 @@ class SSHAuthorize():
             subprocess.run(f'ssh root@{node} "echo -e \'{new_public_keys}\' > /root/.ssh/authorized_keys"',
                            shell=True)
 
+    def distribute_all_hosts_by_connect_via_user(self, cluster_name):
+        all_hosts_info = self.convert_all_hosts_by_cluster_to_string(cluster_name)
+        # local_ipaddr = self.get_host_ip()
+        # local_hostname = os.popen('hostname').read()
+        # all_hosts_info = all_hosts_info + f'{local_ipaddr} {local_hostname}'
+        for obj_connection in self.connect_via_user:
+            obj_connection.exctCMD(f"echo -e \'{all_hosts_info}\' >> /etc/hosts")
+
+    def distribute_all_hosts_in_local(self, cluster_name):
+        all_hosts_info = self.convert_all_hosts_by_cluster_to_string(cluster_name)
+        os.system(f"echo \'{all_hosts_info}\' >> /etc/hosts")
+
+    def distribute_new_hosts_to_old_node_by_remove(self, cluster_name):
+        # 获取该集群现有节点列表 for 循环
+        # 1.重新获取本地 hosts 信息
+        # 2.获取该节点 hosts 文件的内容
+        # 3.删除标识符以下行
+        # 4.将新内容覆盖重新写入（针对每一个节点的 hosts 文件）
+        old_node = [node for node in self.cluster_info['Cluster'][cluster_name]['public_key'].keys()]
+        # 移除后的重新写入的 hosts 内容
+        new_hosts_info = self.convert_all_hosts_by_cluster_to_string(cluster_name)
+        # 先移除标识之后的的所有列，然后再写入
+        for node in old_node:
+            self.handle_hosts_file_by_remove_flag(node)
+            # 等待文件写完再进行下一步
+            time.sleep(2)
+            subprocess.run(f'ssh root@{node} "echo -e \'{new_hosts_info}\' >> /etc/hosts"',
+                           shell=True)
+
+    def handle_hosts_file_by_remove_flag(self, hostname):
+        # 以行读取，返回列表
+        hosts_info = os.popen(f'ssh root@{hostname} "cat /etc/hosts"').readlines()
+        before_remove_flag_str = ""
+        for i in range(len(hosts_info)):
+            if hosts_info[i] == SSHAuthorize.remove_flag:
+                before_remove_flag_str = hosts_info[0:i]
+        if before_remove_flag_str:
+            write_string = "".join(before_remove_flag_str)
+            # 等待文件读完再进行下一步
+            time.sleep(2)
+            os.popen(f'ssh root@{hostname} "echo \'{write_string}\' > /etc/hosts"')
+            # print('/etc/hosts:\n', os.popen(f'ssh root@{hostname} "cat /etc/hosts"').read())
+        else:
+            print('something wrong happened')
+            sys.exit()
+
+    def handle_host_file_remove_by_hostname_in_local(self, hostname):
+        hosts_info = os.popen(f'cat /etc/hosts').readlines()
+        # 以空格开始，以换行符结束
+        find_str = f' {hostname}\n'
+        # 该行不包括该主机名
+        lines = [line for line in hosts_info if find_str not in line]
+        # 列表转字符串
+        write_string = "".join(lines)
+        os.system(f'echo \'{write_string}\' > /etc/hosts')
+
     def init_cluster(self, cluster_name, list_of_nodes):
-        # 1, connect to all nodes.
-        # 2, get all public_key from every node.
-        # 3, cord keys(汇总all pbkey 放进字典插入）
-        # 4, distribute all keys.
         if self.cluster_is_exist('Cluster', cluster_name):
             print('this cluster name is exist')
             sys.exit()
@@ -177,34 +332,53 @@ class SSHAuthorize():
             # make connection 的时候存放 ssh 对象
             ssh = self.make_connect(node[0], node[1], node[2], node[3])
             public_key = self.get_public_key(ssh)
-            self.keys_to_add.update({node[0]: public_key})
+            hostname = self.get_hostname(ssh)
+            # 逐个节点存放 ip-主机名 列表
+            self.hosts_to_add.append([node[0], hostname])
+            # 逐个节点存放 主机名-公钥 字典
+            self.keys_to_add.update({hostname: public_key})
+        # 公钥信息放进本地配置文件
         self.set_all_public_keys_by_cluster(cluster_name, self.keys_to_add)
+        # hosts 信息放进本地配置文件
+        self.set_all_hosts_by_cluster(cluster_name, self.hosts_to_add)
+        # 分发该集群公钥信息通过 ssh 连接对象
         self.distribute_all_keys_by_connect_via_user(cluster_name)
+        # 分发集群 hosts 信息到集群节点通过 ssh 连接对象
+        self.distribute_all_hosts_by_connect_via_user(cluster_name)
+        # 将集群 hosts 信息写入管理节点本地 hosts 文件
+        self.distribute_all_hosts_in_local(cluster_name)
 
     def cluster_add(self, cluster_name, list_of_nodes):
-        # 1. connect new node
-        # 2. get public_key from new node
-        # 3. cord all new keys
-        # 4. distribute new keys(这样可以使用echo来写）？ new node need all keys, old node need new keys
         if not self.cluster_is_exist('Cluster', cluster_name):
             print('this cluster name is not exist')
             sys.exit()
         for node in list_of_nodes:
-            if self.node_is_exist('Cluster', node[0]):
-                print(f'this {node[0]} is exist')
-                continue
             ssh = self.make_connect(node[0], node[1], node[2], node[3])
             key = self.get_public_key(ssh)
-            self.keys_to_add.update({node[0]: key})
+            hostname = self.get_hostname(ssh)
+            if self.node_is_exist('Cluster', hostname):
+                print(f'this {hostname} is exist')
+                continue
+            # 逐个节点存放 ip-主机名 列表
+            self.hosts_to_add.append([node[0], hostname])
+            # 逐个节点存放 主机名-公钥 字典
+            self.keys_to_add.update({hostname: key})
+        # 新公钥信息插入本地配置文件
         self.insert_new_public_keys_by_cluster(cluster_name)
+        # 新 hosts 信息插入本地配置文件
+        self.insert_new_hosts_by_cluster(cluster_name)
+        # 新增节点下发公钥
         self.distribute_all_keys_by_connect_via_user(cluster_name)
+        # 新增节点下发 hosts
+        self.distribute_all_hosts_by_connect_via_user(cluster_name)
+        # 原有节点下发公钥
         self.distribute_new_keys_to_old_node_by_add(cluster_name)
+        # 原有节点下发 hosts
+        self.distribute_new_hosts_to_old_node_by_add(cluster_name)
+        # 本地管理节点下发 hosts
+        self.distribute_new_hosts_to_local_node_by_add()
 
     def remove_from_cluster(self, cluster_name, list_of_nodes_ip):
-        # 1. get public_key from remove node
-        # 2. get other node authorized_keys info
-        # 3. del this public_key
-        # 4. rewrite processed str
         if not self.cluster_is_exist('Cluster', cluster_name):
             print('this cluster name is not exist')
             sys.exit()
@@ -212,27 +386,38 @@ class SSHAuthorize():
             if not self.node_is_exist('Cluster', node):
                 print(f'this {node} is not exist')
                 continue
-            # remove_pubulic_key = self.get_public_key_by_cmd(node)
-            # self.keys_to_remove.update({node: remove_pubulic_key})
+            # 处理 hosts 文件
+            self.handle_hosts_file_by_remove_flag(node)
+            # rm authorized_keys file
             subprocess.run(f'ssh "root@{node}" "rm /root/.ssh/authorized_keys"', shell=True)
-            self.delete_member('Cluster', cluster_name, node)
+            # 处理本地 public_key 记录
+            self.delete_public_key_member('Cluster', cluster_name, 'public_key', node)
+            # 处理本地 hosts 记录
+            self.delete_hosts_member('Cluster', cluster_name, 'hosts', node)
+            # 处理管理节点 hosts 文件 （使用 os 模块本地执行)
+            self.handle_host_file_remove_by_hostname_in_local(node)
+        # 更新本地 json 配置文件
         self.commit_data()
+        # 从本地获取新的总公钥信息+管理节点公钥下发到旧节点
         self.distribute_new_keys_to_old_node_by_remove(cluster_name)
+        # 从本地获取新的 hosts 信息下发到旧节点
+        self.distribute_new_hosts_to_old_node_by_remove(cluster_name)
 
 
 if __name__ == '__main__':
-    node_infos = [['10.203.1.195', 22, 'root', 'password'], ['10.203.1.87', 22, 'root', 'password']]
-    new_node_list = [['10.203.1.86', 22, 'root', 'password']]
-    remove_list_ip = ['10.203.1.87', '10.203.1.86']
-    # 初始化集群节点
+    node_infos = [['10.203.1.86', 22, 'root', 'password'], ['10.203.1.87', 22, 'root', 'password']]
+    new_node_list = [['10.203.1.87', 22, 'root', 'password']]
+    remove_list_node = ['openstcinder']
+    # ssh = paramiko.SSHClient()
+    # ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # ssh.connect('10.203.1.86',22)
+    # print(ssh.exec_command('pwd')[1].read().decode())
+    # # 初始化集群节点
     # ssh1 = SSHAuthorize()
     # ssh1.init_cluster('cluster1', node_infos)
-    # 新增节点
-    # ssh2 = SSHAuthorize()
-    # ssh2.cluster_add('cluster1', new_node_list)
-    # 移除节点
+    # # 移除节点
     # ssh3 = SSHAuthorize()
-    # ssh3.remove_from_cluster('cluster1', remove_list_ip)
+    # ssh3.remove_from_cluster('cluster1', remove_list_node)
     # 新增节点
-    # ssh4 = SSHAuthorize()
-    # ssh4.cluster_add('cluster1', new_node_list)
+    ssh2 = SSHAuthorize()
+    ssh2.cluster_add('cluster1', new_node_list)
