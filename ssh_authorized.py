@@ -2,7 +2,7 @@ import os
 import subprocess
 # import paramiko
 
-from ssh_module import ssh_connect
+import ssh_connect
 import time
 import json
 import sys
